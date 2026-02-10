@@ -1,5 +1,5 @@
 services:
-  # Base de données demandée par le cahier des charges (SGBD MySQL) [cite: 178, 212]
+  # 1. Le service Base de Données (MySQL)
   db:
     image: mysql:8.0
     container_name: mysql_gel
@@ -7,14 +7,31 @@ services:
     environment:
       MYSQL_DATABASE: smartgel_db
       MYSQL_ROOT_PASSWORD: root_password
+    # On map le port 3306 du conteneur vers 3307 de ton PC 
+    # pour éviter le conflit "Address already in use"
     ports:
-      - "3306:3306"
+      - "3307:3306"
+    volumes:
+      - db_data:/var/lib/mysql # Pour garder les données même si tu éteins Docker
     healthcheck:
       test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
       timeout: 20s
       retries: 10
 
-  # Votre API REST (Étudiant 1) que vous simulez pour avancer sur l'app Android [cite: 116, 118, 140]
+  # 2. L'interface graphique pour gérer la BDD (PhpMyAdmin)
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: pma_gel
+    restart: always
+    ports:
+      - "8080:80"
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+    depends_on:
+      - db
+
+  # 3. Ton API (Node.js) qui sera utilisée par l'App Android et le Site Web
   api:
     build: .
     container_name: node_api_mock
@@ -29,3 +46,7 @@ services:
       DB_PASSWORD: root_password
       DB_NAME: smartgel_db
       PORT: 3000
+
+# Volume pour la persistance des données
+volumes:
+  db_data:

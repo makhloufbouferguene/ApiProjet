@@ -1,92 +1,157 @@
 const express = require('express');
 const cors = require('cors');
+const mysql = require('mysql2');
+
 const app = express();
 
-// Middleware
-app.use(cors()); // Autorise les requêtes provenant du site web de l'Étudiant 2
-app.use(express.json()); // Permet de lire le format JSON envoyé par Android ou l'ESP32
+// --- CONFIGURATION ---
+app.use(cors()); // Indispensable pour que le site Web de l'étudiant 2 fonctionne
+app.use(express.json()); // Permet de lire le JSON envoyé par Android et l'ESP32
 
-// --- DONNÉES DE TEST (MOCK) ---
+// --- 1. CONNEXION À LA BASE DE DONNÉES MYSQL ---
+// On utilise les variables d'environnement définies dans docker-compose.yml
+const db = mysql.createPool({
+    host: process.env.DB_HOST || 'db', // 'db' est le nom du service dans docker-compose
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || 'root_password',
+    database: process.env.DB_NAME || 'smartgel_db',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
 
-// Utilisateurs définis selon les rôles du projet [cite: 127]
-const users = [
-    { login: "admin", mdp: "123", role: "RT", nom: "Responsable Technique" },
-    { login: "chef", mdp: "456", role: "RA", nom: "Responsable des Agents" },
-    { login: "agent01", mdp: "789", role: "Agent", nom: "Jean Dupont" }
-];
+// --- 2. INITIALISATION : CRÉATION AUTOMATIQUE DES TABLES ---
 
-// État initial des bornes [cite: 119, 120, 121, 122]
-let bornes = [
-    { 
-        id_esp: "ESP32_01", 
-        niveau_gel: 85, 
-        niveau_batterie: 95, 
-        salle: "Entrée Principale", 
-        last_update: new Date().toISOString() 
-    },
-    { 
-        id_esp: "ESP32_02", 
-        niveau_gel: 8, // Cas d'alerte : < 10% [cite: 128]
-        niveau_batterie: 45, 
-        salle: "Cafétéria", 
-        last_update: new Date().toISOString() 
+// A. Table des UTILISATEURS (Pour l'Étudiant 2 - Gestion des comptes)
+const createUsersTable = `
+    CREATE TABLE IF NOT EXISTS utilisateurs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        login VARCHAR(50) UNIQUE NOT NULL,
+        mdp VARCHAR(255) NOT NULL,
+        nom VARCHAR(100),
+        role VARCHAR(20) NOT NULL -- 'RT' (Tech), 'RA' (Resp Agent), 'Agent'
+    )
+`;
+
+// B. Table des BORNES (Pour l'Étudiant 3 & 4 - Suivi technique)
+const createBornesTable = `
+    CREATE TABLE IF NOT EXISTS bornes (
+        id_esp VARCHAR(50) PRIMARY KEY,
+        niveau_gel INT,
+        niveau_batterie INT,
+        salle VARCHAR(100),
+        agent_id INT DEFAULT NULL, -- Pour l'affectation à un agent
+        last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (agent_id) REFERENCES utilisateurs(id) ON DELETE SET NULL
+    )
+`;
+
+// Exécution de la création des tables au démarrage
+db.query(createUsersTable, (err) => {
+    if (err) console.error("❌ Erreur création table utilisateurs:", err);
+    else console.log("✅ Table 'utilisateurs' prête.");
+});
+
+db.query(createBornesTable, (err) => {
+    if (err) console.error("❌ Erreur création table bornes:", err);
+    else console.log("✅ Table 'bornes' prête.");
+});
+
+// --- 3. ROUTES API ---
+
+// === GESTION DES COMPTES (Pour le Site Web - Étudiant 2) ===
+
+// Route INSCRIPTION (Créer un compte RT, RA ou Agent)
+app.post('/api/register', (req, res) => {
+    const { login, mdp, nom, role } = req.body;
+
+    if (!login || !mdp || !role) {
+        return res.status(400).json({ message: "Champs manquants (login, mdp, role)" });
     }
-];
 
-// --- ROUTES API ---
+    const sql = "INSERT INTO utilisateurs (login, mdp, nom, role) VALUES (?, ?, ?, ?)";
+    db.query(sql, [login, mdp, nom, role], (err, result) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).json({ success: false, message: "Erreur (Login déjà pris ?)" });
+        }
+        res.status(201).json({ success: true, message: "Compte créé avec succès !" });
+    });
+});
 
-// 1. Authentification (Login/MDP) [cite: 141, 145, 219]
+// Route LOGIN (Pour Android - Étudiant 4 & Web - Étudiant 2)
 app.post('/api/login', (req, res) => {
     const { login, mdp } = req.body;
-    const user = users.find(u => u.login === login && u.mdp === mdp);
 
-    if (user) {
-        console.log(`Connexion : ${user.nom} (${user.role})`);
-        res.status(200).json({
-            success: true,
-            role: user.role,
-            nom: user.nom
-        });
-    } else {
-        res.status(401).json({ success: false, message: "Identifiants incorrects" });
-    }
+    const sql = "SELECT * FROM utilisateurs WHERE login = ? AND mdp = ?";
+    db.query(sql, [login, mdp], (err, results) => {
+        if (err) return res.status(500).json({ message: "Erreur serveur BDD" });
+
+        if (results.length > 0) {
+            const user = results[0];
+            console.log(`Connexion réussie : ${user.login} (${user.role})`);
+            res.json({
+                success: true,
+                id: user.id,
+                nom: user.nom,
+                role: user.role,
+                message: "Authentification réussie"
+            });
+        } else {
+            res.status(401).json({ success: false, message: "Identifiants incorrects" });
+        }
+    });
 });
 
-// 2. Récupérer toutes les bornes (Pour RT et RA) [cite: 142, 148]
+// === GESTION DES BORNES (Pour Android - Étudiant 4 & IoT - Étudiant 3) ===
+
+// Route GET : Récupérer la liste des bornes
 app.get('/api/bornes', (req, res) => {
-    res.json(bornes);
+    // On récupère aussi le nom de l'agent affecté si besoin
+    const sql = `
+        SELECT bornes.*, utilisateurs.nom as agent_nom 
+        FROM bornes 
+        LEFT JOIN utilisateurs ON bornes.agent_id = utilisateurs.id
+    `;
+    
+    db.query(sql, (err, results) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).json({ error: "Erreur récupération bornes" });
+        }
+        res.json(results);
+    });
 });
 
-// 3. Recevoir les données d'une borne (Simulation Étudiant 3 / ESP32) [cite: 135, 202]
+// Route POST : Mise à jour par l'ESP32 (Simulation Étudiant 3)
+// Si la borne existe, on met à jour. Si elle n'existe pas, on la crée.
 app.post('/api/update', (req, res) => {
     const { id_esp, niv_gel, niv_batt } = req.body;
     
-    // Mise à jour ou ajout de la borne dans la liste
-    const index = bornes.findIndex(b => b.id_esp === id_esp);
-    const updatedData = {
-        id_esp,
-        niveau_gel: niv_gel,
-        niveau_batterie: niv_batt,
-        salle: index !== -1 ? bornes[index].salle : "Salle inconnue",
-        last_update: new Date().toISOString()
-    };
+    // Salle par défaut si nouvelle borne
+    const salleDefaut = "Salle Inconnue";
 
-    if (index !== -1) {
-        bornes[index] = updatedData;
-    } else {
-        bornes.push(updatedData);
-    }
+    const sql = `
+        INSERT INTO bornes (id_esp, niveau_gel, niveau_batterie, salle) 
+        VALUES (?, ?, ?, ?) 
+        ON DUPLICATE KEY UPDATE niveau_gel = VALUES(niveau_gel), niveau_batterie = VALUES(niveau_batterie)
+    `;
 
-    console.log(`Mise à jour reçue pour ${id_esp}: Gel ${niv_gel}%, Batt ${niv_batt}%`);
-    res.status(200).json({ message: "Données reçues et stockées" });
+    db.query(sql, [id_esp, niv_gel, niv_batt, salleDefaut], (err, result) => {
+        if (err) {
+            console.error(err);
+            return res.status(500).send("Erreur mise à jour borne");
+        }
+        console.log(`📡 Borne ${id_esp} mise à jour : Gel ${niv_gel}%, Batt ${niv_batt}%`);
+        res.json({ message: "Données reçues et stockées" });
+    });
 });
 
-// Lancement du serveur sur le port 3000
+// --- DEMARRAGE DU SERVEUR ---
 const PORT = 3000;
 app.listen(PORT, () => {
     console.log(`=============================================`);
-    console.log(`API PROJET BORNE DE GEL LANCÉE`);
-    console.log(`Local : http://localhost:${PORT}`);
-    console.log(`URL Android (Émulateur) : http://10.0.2.2:${PORT}`);
+    console.log(`🚀 API SMARTGEL DÉMARRÉE SUR LE PORT ${PORT}`);
+    console.log(`📡 En attente de connexion MySQL...`);
     console.log(`=============================================`);
 });
