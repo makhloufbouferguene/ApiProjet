@@ -1,9 +1,22 @@
 {
-  "name": "api-mock-gel",
+  "name": "api-gel-borne",
   "version": "1.0.0",
+  "description": "API pour le projet Borne de Gel (BTS CIEL)",
   "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "api",
+    "bts",
+    "ciel"
+  ],
+  "author": "Etudiant 4",
+  "license": "ISC",
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.18.2",
-    "mysql2": "^3.0.0"
+    "mysql2": "^3.9.0"
   }
 }
