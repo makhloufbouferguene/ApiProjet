@@ -1,0 +1,31 @@
+services:
+  # Base de données demandée par le cahier des charges (SGBD MySQL) [cite: 178, 212]
+  db:
+    image: mysql:8.0
+    container_name: mysql_gel
+    restart: always
+    environment:
+      MYSQL_DATABASE: smartgel_db
+      MYSQL_ROOT_PASSWORD: root_password
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Votre API REST (Étudiant 1) que vous simulez pour avancer sur l'app Android [cite: 116, 118, 140]
+  api:
+    build: .
+    container_name: node_api_mock
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_USER: root
+      DB_PASSWORD: root_password
+      DB_NAME: smartgel_db
+      PORT: 3000
